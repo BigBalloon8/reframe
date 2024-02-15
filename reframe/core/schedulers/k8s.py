@@ -6,6 +6,7 @@ import time
 from threading import Thread
 import random
 import warnings
+import copy
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -22,7 +23,6 @@ class _K8Job(sched.Job):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._pod_name = None
-        self.pod_config_changes = None
         self._cancel_time = None
         self._log_thread:Thread = None
 
@@ -47,21 +47,16 @@ class _K8Job(sched.Job):
 class LocalJobScheduler(sched.JobScheduler):
     CANCEL_GRACE_PERIOD = 2
     WAIT_POLL_SECS = 0.001
-    run_complete = False
 
     def make_job(self, *args, **kwargs):
         return _K8Job(*args, **kwargs)
 
     def submit(self, job: _K8Job):
-        # Run from the absolute path
         stdout = os.path.join(job.workdir, job.stdout)
         f_stderr = open(job.stderr, 'w+').close()
-        
-        # The new process starts also a new session (session leader), so that
-        # we can later kill any other processes that this might spawn by just
-        # killing this one.
 
-        pod_name, namespace, log_thread = k8s_utils.launch_pod(job.namespace, job.pod_config, stdout)
+        # Launch K8s launch pod
+        pod_name, namespace, log_thread = k8s_utils.launch_pod(job.namespace, copy.deepcopy(job.pod_config), stdout)
 
         # Update job info
         job._pod_name = pod_name
@@ -80,34 +75,15 @@ class LocalJobScheduler(sched.JobScheduler):
     def filternodes(self, job, nodes):
         return [_LocalNode(socket.gethostname())]
 
-    def _kill_all(self, job: _K8Job):
-        '''Send SIGKILL to all the processes of the spawned job.'''
+    def _kill_pod(self, job: _K8Job):
+        '''Deletes the kubernetes pod and stops the logging thread'''
         k8s_utils.delete_pod(job._pod_name, job.namespace)
         job._log_thread.join()
         return
-        try:
-            os.killpg(job.jobid, signal.SIGKILL)
-            job._signal = signal.SIGKILL
-        except (ProcessLookupError, PermissionError):
-            # The process group may already be dead or assigned to a different
-            # group, so ignore this error
-            self.log(f'pid {job.jobid} already dead')
-        finally:
-            # Close file handles
-            job.f_stdout.close()
-            job.f_stderr.close()
-            job._state = 'FAILURE'
 
     def cancel(self, job: _K8Job):
-        '''Cancel job.
-
-        The SIGTERM signal will be sent first to all the processes of this job
-        and after a grace period (default 2s) the SIGKILL signal will be send.
-
-        This function waits for the spawned process tree to finish.
-        '''
-        k8s_utils.delete_pod(job._pod_name, job.namespace)
-        job._log_thread.join()
+        '''Deletes the kubernetes pod and stops the logging thread'''
+        self._kill_pod(job)
         job._cancel_time = time.time()
 
     def wait(self, job):
@@ -122,19 +98,12 @@ class LocalJobScheduler(sched.JobScheduler):
         while not self.finished(job):
             self.poll(job)
             time.sleep(self.WAIT_POLL_SECS)
+        self._kill_pod(job)
 
     def finished(self, job: _K8Job):
-        '''Check if the spawned process has finished.
-
-        This function does not wait the process. It just queries its state. If
-        the process has finished, you *must* call wait() to properly cleanup
-        after it.
-        '''
+        '''Query the k8s pod to check if its still alive'''
         if job.exception:
             raise job.exception
-
-        if self.run_complete:
-            return True
 
         return k8s_utils.has_finished(job._pod_name, job.namespace)
 
@@ -153,23 +122,20 @@ class LocalJobScheduler(sched.JobScheduler):
             t_rem = self.CANCEL_GRACE_PERIOD - (time.time() - job.cancel_time)
             if t_rem > 0:
                 time.sleep(t_rem)
-            self._kill_all(job)
+            self._kill_pod(job)
             return
 
         # Job has not finished; check if we have reached a timeout
         if not self.finished(job):
             t_elapsed = time.time() - job.submit_time
             if job.time_limit and t_elapsed > job.time_limit:
-                self._kill_all(job)
+                self._kill_pod(job)
                 job._state = 'TIMEOUT'
                 job._exception = JobError(
                     f'job timed out ({t_elapsed:.6f}s > {job.time_limit}s)',
                     job.jobid
                 )
             return
-        
-        self.run_complete = True
-        self._kill_all(job)
 
 class _LocalNode(sched.Node):
     def __init__(self, name):

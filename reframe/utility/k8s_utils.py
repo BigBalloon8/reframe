@@ -42,7 +42,7 @@ def logging_thread(namespace, pod_name, std_out):
     start_idx = 0
             
     with open(std_out, "a+") as std_out_file:
-        while status not in ("Failed", "Succeeded"):
+        while status not in ("Failed", "Succeeded", "Terminating"):
             try:
                 status = v1.read_namespaced_pod(name=pod_name, namespace=namespace).status.phase
                 pod_log = v1.read_namespaced_pod_log(name=pod_name, namespace=namespace)
@@ -65,26 +65,37 @@ def launch_pod(namespace=None, pod_def: dict="", std_out=""):
         with open(pod_def, "r") as stream:
             pod_def = yaml.safe_load(stream)
     
-    # Change Name to support multiple pods
+    # Change Names to support multiple pods
+    base_identifier =''.join(random.choices(string.ascii_lowercase, k=8))
     if "metadata" in pod_def.keys():
         if "generateName" in pod_def["metadata"].keys():
             base_pod_name = pod_def["metadata"]["generateName"]
-            base_pod_name  = f"rfm-{base_pod_name}{''.join(random.choices(string.ascii_lowercase, k=8))}"
+            base_pod_name  = f"rfm-{base_pod_name}-{base_identifier}"
             pod_def["metadata"]["name"] = base_pod_name
             pod_def["metadata"].pop("generateName")
         elif "name" in pod_def["metadata"].keys():
             base_pod_name = pod_def["metadata"]["name"]
-            base_pod_name  = f"rfm-{base_pod_name}{''.join(random.choices(string.ascii_lowercase, k=8))}"
+            base_pod_name  = f"rfm-{base_pod_name}{base_identifier}"
             pod_def["metadata"]["name"] = base_pod_name
         else:
             raise ValueError("Pod Definition must have a name or generateName")
     else:
-        pod_def["metadata"] = {"name": f"rfm-{''.join(random.choices(string.ascii_lowercase, k=8))}"}
+        pod_def["metadata"] = {"name": f"rfm-{base_identifier}"}
     
-    for i in range(len(pod_def["spec"]["containers"])):
-        container_name = pod_def["spec"]["containers"][i]["name"]
-        container_name = f"{container_name}-{''.join(random.choices(string.ascii_lowercase, k=8))}"
-        pod_def["spec"]["containers"][i]["name"] = container_name
+    container_types = ["containers", "initContainers", "ephemeralContainers"]
+    for container_type in container_types:
+        if "template" in pod_def["spec"].keys():
+            if container_type in pod_def["spec"]["template"]["spec"].keys():
+                for i in range(len(pod_def["spec"]["template"]["spec"][container_type])):
+                    container_name = pod_def["spec"]["template"]["spec"][container_type][i]["name"]
+                    container_name = f"{container_name}-{base_identifier}"
+                    pod_def["spec"]["template"]["spec"][container_type][i]["name"] = container_name
+        else:
+            if container_type in pod_def["spec"].keys():
+                for i in range(len(pod_def["spec"][container_type])):
+                    container_name = pod_def["spec"][container_type][i]["name"]
+                    container_name = f"{container_name}-{base_identifier}"
+                    pod_def["spec"][container_type][i]["name"] = container_name
     
     # Launch Pod
     while True:
@@ -94,15 +105,22 @@ def launch_pod(namespace=None, pod_def: dict="", std_out=""):
             body = json.loads(e.body)["message"]
             # TODO Make this work for all reasources
             if "exceeded quota:" in body:
-                if "gpu" not in body:
-                    raise ValueError(f"Quota Exceeded See: {e.body}")
-                num_gpus = pod_def["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"]
-                limit = re.search(r'limited: requests.*=(\d+)', body)
-                if num_gpus > int(limit.group(1)):
-                    raise ValueError(f"Requested {num_gpus} GPU, namespace limited to {limit.group(1)} GPUs")
-                warnings.warn("Maximum quota resources in use waiting for resources to free up")
+                pattern_requested = r"requested:.*?(\d+)"
+                pattern_used = r"used:.*?(\d+)"
+                pattern_limited = r"limited:.*?(\d+)"
+
+                resource_pattern = r"requested: requests\.([\w\.\/]+)=\d+"
+                resource = re.search(resource_pattern, body).group(1)
+
+                requested = re.search(pattern_requested, body).group(1)
+                used = re.search(pattern_used, body).group(1)
+                limited = re.search(pattern_limited, body).group(1)
+                if int(requested) > int(limited):
+                    raise ValueError(f"Namespace {namespace} is limited to {limited} but requested {requested}")
+                warnings.warn(f"Maximum quota of {resource} in use waiting for resources to free up (in use: {used}, requested: {requested}, limit: {limited})")
                 time.sleep(10)
                 continue
+            #if "higher than the maximum allowed" in body:
             else:
                 raise e
         break
