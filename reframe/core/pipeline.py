@@ -959,6 +959,9 @@ class RegressionTest(RegressionMixin, jsonext.JSONSerializable):
     #:       that allows also custom job script directive prefixes.
     extra_resources = variable(typ.Dict[str, typ.Dict[str, object]],
                                value={})
+    
+    #TODO add documentation
+    pod_config = variable(dict, str, value={})
 
     #: .. versionadded:: 3.3
     #:
@@ -1687,13 +1690,16 @@ class RegressionTest(RegressionMixin, jsonext.JSONSerializable):
         elif job_type == 'run':
             script_name = 'rfm_job.sh'
 
-        return Job.create(scheduler,
+        job = Job.create(scheduler,
                           launcher,
                           name=f'rfm_{self.short_name}',
                           script_filename=script_name,
                           workdir=self._stagedir,
                           sched_access=self._current_partition.access,
                           **job_opts)
+        if scheduler.registered_name == "k8s":
+            job.pod_config = self.pod_config
+        return job
 
     def _setup_build_job(self, **job_opts):
         self._build_job = self._create_job(

@@ -99,3 +99,4 @@ ENV/
 
 # Vim temp files
 *.swp
+external/x86_64/*
