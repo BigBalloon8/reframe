@@ -960,7 +960,14 @@ class RegressionTest(RegressionMixin, jsonext.JSONSerializable):
     extra_resources = variable(typ.Dict[str, typ.Dict[str, object]],
                                value={})
     
-    #TODO add documentation
+    #: The pod config/definition for the k8s pod. Reframe will launch a k8s 
+    #: pod based on the :attr: pod_config think of it like running ``kubectl
+    #: create -f pod_config``. The pod config can be passed as a path like 
+    #: string to a yaml file containing the pod definition or as a :type: dict
+    #: which contains a the pod definition.
+    #:
+    #: :type: :class:`dict` or :class:`str`
+    #: :default: ``{}``
     pod_config = variable(dict, str, value={})
 
     #: .. versionadded:: 3.3
@@ -1965,6 +1972,8 @@ class RegressionTest(RegressionMixin, jsonext.JSONSerializable):
                     "or the corresponding partition configuration setting"
                 )
 
+        scheduler = self._current_partition.scheduler
+
         self.job.num_tasks = self.num_tasks
         self.job.num_tasks_per_node = self.num_tasks_per_node
         self.job.num_tasks_per_core = self.num_tasks_per_core
@@ -1976,20 +1985,23 @@ class RegressionTest(RegressionMixin, jsonext.JSONSerializable):
         )
         self.job.max_pending_time = self.max_pending_time
         self.job.exclusive_access = self.exclusive_access
-        exec_cmd = [self.job.launcher.run_command(self.job),
-                    self.executable, *self.executable_opts]
-
-        if self.build_system:
-            prepare_cmds = self.build_system.prepare_cmds()
+        if scheduler.registered_name == "k8s":
+            commands = []
         else:
-            prepare_cmds = []
+            exec_cmd = [self.job.launcher.run_command(self.job),
+                        self.executable, *self.executable_opts]
 
-        commands = [
-            *prepare_cmds,
-            *self.prerun_cmds,
-            ' '.join(exec_cmd).strip(),
-            *self.postrun_cmds
-        ]
+            if self.build_system:
+                prepare_cmds = self.build_system.prepare_cmds()
+            else:
+                prepare_cmds = []
+
+            commands = [
+                *prepare_cmds,
+                *self.prerun_cmds,
+                ' '.join(exec_cmd).strip(),
+                *self.postrun_cmds
+            ]
         user_environ = Environment(self.unique_name,
                                    self.modules, self.env_vars.items())
         environs = [
