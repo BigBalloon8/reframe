@@ -25,6 +25,8 @@ class _K8Job(sched.Job):
         self._pod_name = None
         self._cancel_time = None
         self._log_thread:Thread = None
+        self._job_kind = None
+        self._num_pods = None
 
     @property
     def proc(self):
@@ -53,15 +55,18 @@ class LocalJobScheduler(sched.JobScheduler):
 
     def submit(self, job: _K8Job):
         stdout = os.path.join(job.workdir, job.stdout)
-        f_stderr = open(job.stderr, 'w+').close()
+        open(job.stderr, 'w+').close()
+        open(job.stdout, 'w+').close()
 
         # Launch K8s launch pod
-        pod_name, namespace, log_thread = k8s_utils.launch_pod(job.namespace, copy.deepcopy(job.pod_config), stdout)
+        pod_name, namespace, log_thread, num_pods, job_kind = k8s_utils.launch_k8s(job.namespace, copy.deepcopy(job.pod_config), stdout)
 
         # Update job info
         job._pod_name = pod_name
         job.namespace = namespace
         job._log_thread = log_thread
+        job._job_kind = job_kind
+        job._num_pods = num_pods
         job._jobid = random.randint(0, 1000000)
         job._state = 'RUNNING'
         job._submit_time = time.time()
@@ -77,8 +82,11 @@ class LocalJobScheduler(sched.JobScheduler):
 
     def _kill_pod(self, job: _K8Job):
         '''Deletes the kubernetes pod and stops the logging thread'''
-        k8s_utils.delete_pod(job._pod_name, job.namespace)
         job._log_thread.join()
+        if job._job_kind == 'job':
+            k8s_utils._delete_job(job._pod_name, job.namespace)
+        elif job._job_kind == 'pod':
+            k8s_utils._delete_pod(job._pod_name, job.namespace)
         return
 
     def cancel(self, job: _K8Job):
@@ -104,8 +112,12 @@ class LocalJobScheduler(sched.JobScheduler):
         '''Query the k8s pod to check if its still alive'''
         if job.exception:
             raise job.exception
+        
+        if job._job_kind == 'job':
+            return k8s_utils._has_job_finished(job._pod_name, job.namespace, job._num_pods)
+        elif job._job_kind == 'pod':
+            return k8s_utils._has_pod_finished(job._pod_name, job.namespace)
 
-        return k8s_utils.has_finished(job._pod_name, job.namespace)
 
     def poll(self, *jobs):
         for job in jobs:
