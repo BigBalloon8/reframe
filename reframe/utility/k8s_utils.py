@@ -31,84 +31,122 @@ def _get_name_space(namespace=None):
                     raise ValueError("Could not find namespace please provide with --namespace ________ to executable_opts")
     return namespace
 
-def launch_k8s(namespace=None, k8s_def: dict="", std_out=""):
+
+def launch_k8s(namespace=None, context=None, k8s_def: dict="", std_out="", workload_type=None):
+    namespace = _get_name_space(namespace)
+
     if isinstance(k8s_def, str):
         with open(k8s_def, "r") as stream:
             k8s_def = yaml.safe_load(stream)
+    
+    base_identifier =''.join(random.choices(string.ascii_lowercase, k=8))
+    metadata_handler(k8s_def, base_identifier)
 
     if k8s_def["kind"] == "Pod":
-        return *_launch_pod(namespace, k8s_def, std_out), "pod"
+        num_pods = 1
+        workload_type = "pod"
+        _launch_pod(namespace, context, k8s_def, std_out)
     elif k8s_def["kind"] == "Job":
-        return *_launch_job(namespace, k8s_def, std_out), "job"
+        if "completions" in k8s_def["spec"].keys():
+            num_pods = k8s_def["spec"]["completions"]
+        else:
+            num_pods = 1
+        workload_type = "job"
+        _launch_custom(namespace, context, k8s_def, std_out)
+    elif workload_type != None:
+        num_pods = 1
+        _launch_custom(namespace, context, k8s_def, std_out)
     else:
         raise NotImplementedError(f"K8s Type not supported: {k8s_def['type']}, currently only Pod & Job are supported contact crae@ed.ac.uk yo ")
+    
+    log_thread = multiprocessing.Process(target=_logging_thread, args=(namespace, context, base_identifier, std_out, num_pods,))
+    log_thread.start()
+    return namespace, log_thread, num_pods, workload_type, base_identifier
+
+
+def metadata_handler(container, identifier:str):
+    if isinstance(container, dict):
+        for k in container.keys():
+            if k == "metadata":
+                #Label
+                if "labels" in container[k].keys():
+                    container[k]["labels"]["rfm"] = identifier
+                else:
+                    container[k]["labels"] = {"rfm": identifier}
+
+                #Name
+                if "name" in container[k].keys():
+                    container[k]["name"] = "rfm-" + container[k]["name"] + f"-{identifier}"
+                elif "generateName" in container[k].keys():
+                    container[k]["name"] = "rfm-" + container[k]["generateName"] + f"{identifier}"
+                    del container[k]["generateName"]
+            else:
+                if k == "template":
+                    if "metadata" not in container[k].keys():
+                        container[k]["metadata"] = {}
+                metadata_handler(container[k], identifier)
+    elif isinstance(container, list):
+        for i in container:
+            metadata_handler(i, identifier)
+
+
+def get_pods(identifier, namespace):
+    core_v1 = client.CoreV1Api()
+    pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=f"rfm={identifier}")
+    return pods.items
+
+    
+def _logging_thread(namespace, context, identifier, std_out, num_pods):
+    config.load_kube_config(os.environ["KUBECONFIG"], context=context)
+    v1 = client.CoreV1Api()
+    pod_names = []
+    n_complete = 0
+    pods = get_pods(identifier, namespace)
+    while n_complete != num_pods:
+        pods = get_pods(identifier, namespace)
+        for pod in pods:
+            if pod.status.phase in ("Failed", "Succeeded","CrashLoopBackOff") and pod.metadata.name not in pod_names:
+                n_complete += 1
+                pod_names.append(pod.metadata.name)
+        time.sleep(5)
+    time.sleep(1)
+    
+    with open(std_out, "a+") as std_out_file:
+        std_out_file.write(f"{identifier}\n")
+        for name in pod_names:
+            std_out_file.write(f"\n-------{name}-------\n")
+            std_out_file.write(v1.read_namespaced_pod_log(name=name, namespace=namespace))
+    
+
+def _has_finished(identifier, namespace, num_pods, context=None):
+    config.load_kube_config(os.environ["KUBECONFIG"], context=context)
+    statuses = []
+    for pod in get_pods(identifier, namespace):
+        statuses.append(pod.status.phase in ("Failed", "Succeeded", "CrashLoopBackOff"))
+    return all(statuses) and len(statuses) == num_pods
+
+
+def _delete_workload(identifier, namespace, resource, context=None):
+    if context is None:
+        osext.run_command(f"kubectl delete {resource} --selector='rfm={identifier}' -n {namespace}")
+    else:
+        osext.run_command(f"kubectl delete {resource} --context={context} --selector='rfm={identifier}' -n {namespace}")
+
 
 #--------------------
 # POD
 #--------------------
 
-def _get_pod_name(base_pod_name, namespace):
-    v1 = client.CoreV1Api()
-    pods = v1.list_namespaced_pod(namespace)
-    pod_names = [pod.metadata.name for pod in pods.items]
-    for pod_name in pod_names:
-        if base_pod_name in pod_name:
-            return pod_name
 
-
-def _pod_logging_thread(namespace, pod_name, std_out):
-    v1 = client.CoreV1Api()
-    status = ""
-    start_idx = 0
-            
-    with open(std_out, "a+") as std_out_file:
-        while status not in ("Failed", "Succeeded", "Terminating"):
-            try:
-                status = v1.read_namespaced_pod(name=pod_name, namespace=namespace).status.phase
-                pod_log = v1.read_namespaced_pod_log(name=pod_name, namespace=namespace)
-                if pod_log[start_idx:]:
-                    std_out_file.write(pod_log[start_idx:])
-                    start_idx = len(pod_log)
-            except ApiException as e:
-                pass
-            time.sleep(0.5)
-
-
-def _launch_pod(namespace=None, pod_def: dict="", std_out=""):
-    # Get Namespace
-    namespace = _get_name_space(namespace)
+def _launch_pod(namespace=None, context=None, pod_def: dict="", std_out=""):
     # Init Config
-    config.load_kube_config(os.environ["KUBECONFIG"])
+    config.load_kube_config(os.environ["KUBECONFIG"], context=context)
     v1 = client.CoreV1Api()
-    # Load pod_def
-    if isinstance(pod_def, str):
-        with open(pod_def, "r") as stream:
-            pod_def = yaml.safe_load(stream)
-    
-    # Change Names to support multiple pods
-    base_identifier =''.join(random.choices(string.ascii_lowercase, k=8))
 
-    if "generateName" in pod_def["metadata"].keys():
-        base_pod_name = pod_def["metadata"]["generateName"]
-        base_pod_name  = f"rfm-{base_pod_name}-{base_identifier}"
-        pod_def["metadata"]["name"] = base_pod_name
-        pod_def["metadata"].pop("generateName")
-    elif "name" in pod_def["metadata"].keys():
-        base_pod_name = pod_def["metadata"]["name"]
-        base_pod_name  = f"rfm-{base_pod_name}{base_identifier}"
-        pod_def["metadata"]["name"] = base_pod_name
-    
-    container_types = ["containers", "initContainers", "ephemeralContainers"]
-    for container_type in container_types:
-        if container_type in pod_def["spec"].keys():
-            for i in range(len(pod_def["spec"][container_type])):
-                container_name = pod_def["spec"][container_type][i]["name"]
-                container_name = f"{container_name}-{base_identifier}"
-                pod_def["spec"][container_type][i]["name"] = container_name
-                
     stage_dir = os.path.dirname(std_out)
     with open(os.path.join(stage_dir, "k8s_def.yaml"), "w") as stream:
         yaml.dump(pod_def, stream)
+    
     # Launch Pod
     while True:
         try:
@@ -135,127 +173,22 @@ def _launch_pod(namespace=None, pod_def: dict="", std_out=""):
             else:
                 raise e
         break
-    stage_dir = os.path.dirname(std_out)
-    with open(os.path.join(stage_dir, "k8s_def.yaml"), "w") as stream:
-        yaml.dump(pod_def, stream)
-        
-    log_thread = multiprocessing.Process(target=_pod_logging_thread, args=(namespace, _get_pod_name(base_pod_name, namespace), std_out,))
-    log_thread.start()
-    # TODO allow time for pod to be inited
-    return _get_pod_name(base_pod_name, namespace), namespace, log_thread, 1
-
-
-def _delete_pod(pod_name, namespace):
-    v1 = client.CoreV1Api()
-    v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
-
-
-def _has_pod_finished(pod_name, namespace):
-    v1 = client.CoreV1Api()
-    return v1.read_namespaced_pod(name=pod_name, namespace=namespace).status.phase in ("Failed", "Succeeded","CrashLoopBackOff")
 
 
 #--------------------
-# JOB
-#--------------------
+# Custom
+#--------------------                    
 
+def _launch_custom(namespace=None, context=None, job_def: dict={}, std_out=""):
 
-def _get_all_pods(base_name, namespace):
-    v1 = client.CoreV1Api()
-    pods = v1.list_namespaced_pod(namespace)
-    pod_names = [pod.metadata.name for pod in pods.items]
-    return [pod_name for pod_name in pod_names if base_name in pod_name]
-
-
-def _job_logging_thread(namespace, job_name, std_out, num_pods):
-    v1 = client.CoreV1Api()
-    
-    pod_names = []
-    pods = v1.list_namespaced_pod(namespace, label_selector=f"job-name={job_name}")
-    while not(len(pod_names) == num_pods and all([pod.status.phase in ("Failed", "Succeeded", "CrashLoopBackOff") for pod in pods.items])):
-        pods = v1.list_namespaced_pod(namespace,
-                                  label_selector=f"job-name={job_name}")
-        for pod in pods.items:
-            name = pod.metadata.name
-            if not name in pod_names:
-                pod_names.append(name)
-        time.sleep(1)
-
-    time.sleep(1)
-    
-    with open(std_out, "a+") as std_out_file:
-        std_out_file.write(f"{job_name}\n")
-        for name in pod_names:
-            std_out_file.write(f"\n-------{name}-------\n")
-            std_out_file.write(v1.read_namespaced_pod_log(name=name, namespace=namespace))
-                    
-    
-
-def _launch_job(namespace=None, job_def: dict="", std_out=""):
-    # Get Namespace
-    namespace = _get_name_space(namespace)
-    # Init Config
-    config.load_kube_config(os.environ["KUBECONFIG"])
-
-
-    if isinstance(job_def, str):
-        with open(job_def, "r") as stream:
-            job_def = yaml.safe_load(stream)
-
-    base_identifier =''.join(random.choices(string.ascii_lowercase, k=8))
-
-    if "generateName" in job_def["metadata"].keys():
-        base_job_name = job_def["metadata"]["generateName"]
-        base_job_name  = f"rfm-{base_job_name}-{base_identifier}"
-        job_def["metadata"]["name"] = base_job_name
-        job_def["metadata"].pop("generateName")
-    elif "name" in job_def["metadata"].keys():
-        base_job_name = job_def["metadata"]["name"]
-        base_job_name  = f"rfm-{base_job_name}{base_identifier}"
-        job_def["metadata"]["name"] = base_job_name
-    
-
-    if "generateName" in job_def["spec"]["template"]["metadata"].keys():
-        base_pod_name = job_def["spec"]["template"]["metadata"]["generateName"]
-        base_pod_name  = f"rfm-{base_pod_name}-{base_identifier}"
-        job_def["spec"]["template"]["metadata"]["name"] = base_pod_name
-        job_def["spec"]["template"]["metadata"].pop("generateName")
-    elif "name" in job_def["spec"]["template"]["metadata"].keys():
-        base_pod_name = job_def["spec"]["template"]["metadata"]["name"]
-        base_pod_name  = f"rfm-{base_pod_name}{base_identifier}"
-        job_def["spec"]["template"]["metadata"]["name"] = base_pod_name
-    
-    
-    container_types = ["containers", "initContainers", "ephemeralContainers"]
-    for container_type in container_types:
-        if container_type in job_def["spec"]["template"]["spec"].keys():
-            for i in range(len(job_def["spec"]["template"]["spec"][container_type])):
-                container_name = job_def["spec"]["template"]["spec"][container_type][i]["name"]
-                container_name = f"{container_name}-{base_identifier}"
-                job_def["spec"]["template"]["spec"][container_type][i]["name"] = container_name
-    
     stage_dir = os.path.dirname(std_out)
     with open(os.path.join(stage_dir, "k8s_def.yaml"), "w") as stream:
         yaml.dump(job_def, stream)
-        
-    if "completions" in job_def["spec"].keys():
-        num_pods = job_def["spec"]["completions"]
-    else:
-        num_pods = 1
     
     # TODO add logic for resource limits
-    osext.run_command(f"kubectl create -f {os.path.join(stage_dir, 'k8s_def.yaml')} -n {namespace}")
+    if context is None:
+        osext.run_command(f"kubectl create -f {os.path.join(stage_dir, 'k8s_def.yaml')} -n {namespace}")
+    else:
+        osext.run_command(f"kubectl create -f {os.path.join(stage_dir, 'k8s_def.yaml')} --context={context} -n {namespace}")
+
     
-    log_thread = threading.Thread(target=_job_logging_thread, args=(namespace, base_job_name, std_out, num_pods,))
-    log_thread.start()
-    return base_job_name, namespace, log_thread, num_pods
-
-def _delete_job(job_name, namespace):
-    osext.run_command(f"kubectl delete job {job_name} -n {namespace}")
-
-def _has_job_finished(base_job_name, namespace, num_pods):
-    v1 = client.CoreV1Api()
-    statuses = []
-    for pod_name in _get_all_pods(base_job_name, namespace):
-        statuses.append(v1.read_namespaced_pod(name=pod_name, namespace=namespace).status.phase in ("Failed", "Succeeded", "CrashLoopBackOff"))
-    return all(statuses) and len(statuses) == num_pods

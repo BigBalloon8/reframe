@@ -18,11 +18,13 @@ from reframe.core.backends import register_scheduler
 from reframe.core.exceptions import JobError
 
 class _K8Job(sched.Job):
-    pod_config= variable(str, type(None), dict, value=None)
+    k8s_config= variable(str, type(None), dict, value=None)
     namespace = variable(str, type(None), value=None)
+    context = variable(str, type(None), value=None)
+    k8s_resource = variable(str, type(None), value=None)
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._pod_name = None
+        self._identifier = None
         self._cancel_time = None
         self._log_thread:Thread = None
         self._job_kind = None
@@ -59,10 +61,11 @@ class LocalJobScheduler(sched.JobScheduler):
         open(job.stdout, 'w+').close()
 
         # Launch K8s launch pod
-        pod_name, namespace, log_thread, num_pods, job_kind = k8s_utils.launch_k8s(job.namespace, copy.deepcopy(job.pod_config), stdout)
+        assert job.k8s_config, "job.k8s_config has not been provided"
+        namespace, log_thread, num_pods, job_kind, identifier = k8s_utils.launch_k8s(job.namespace, job.context, job.k8s_config, stdout, job.k8s_resource)
 
         # Update job info
-        job._pod_name = pod_name
+        job._identifier = identifier
         job.namespace = namespace
         job._log_thread = log_thread
         job._job_kind = job_kind
@@ -80,18 +83,20 @@ class LocalJobScheduler(sched.JobScheduler):
     def filternodes(self, job, nodes):
         return [_LocalNode(socket.gethostname())]
 
-    def _kill_pod(self, job: _K8Job):
+    def _kill_pod(self, job: _K8Job, cancel=False):
         '''Deletes the kubernetes pod and stops the logging thread'''
-        job._log_thread.join()
-        if job._job_kind == 'job':
-            k8s_utils._delete_job(job._pod_name, job.namespace)
-        elif job._job_kind == 'pod':
-            k8s_utils._delete_pod(job._pod_name, job.namespace)
+        if not cancel:
+            job._log_thread.join()
+
+        k8s_utils._delete_workload(job._identifier, job.namespace, job._job_kind, job.context)
+
+        if cancel:
+            job._log_thread.join()
         return
 
     def cancel(self, job: _K8Job):
         '''Deletes the kubernetes pod and stops the logging thread'''
-        self._kill_pod(job)
+        self._kill_pod(job, cancel=True)
         job._cancel_time = time.time()
 
     def wait(self, job):
@@ -112,11 +117,7 @@ class LocalJobScheduler(sched.JobScheduler):
         '''Query the k8s pod to check if its still alive'''
         if job.exception:
             raise job.exception
-        
-        if job._job_kind == 'job':
-            return k8s_utils._has_job_finished(job._pod_name, job.namespace, job._num_pods)
-        elif job._job_kind == 'pod':
-            return k8s_utils._has_pod_finished(job._pod_name, job.namespace)
+        return k8s_utils._has_finished(job._identifier, job.namespace, job._num_pods, job.context)
 
 
     def poll(self, *jobs):

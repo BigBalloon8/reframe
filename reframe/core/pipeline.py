@@ -960,15 +960,20 @@ class RegressionTest(RegressionMixin, jsonext.JSONSerializable):
     extra_resources = variable(typ.Dict[str, typ.Dict[str, object]],
                                value={})
     
-    #: The pod config/definition for the k8s pod. Reframe will launch a k8s 
-    #: pod based on the :attr: pod_config think of it like running ``kubectl
-    #: create -f pod_config``. The pod config can be passed as a path like 
-    #: string to a yaml file containing the pod definition or as a :type: dict
-    #: which contains a the pod definition.
+    #: The k8s config/definition for the k8s workload. Reframe will launch a k8s 
+    #: workload based on the :attr: k8s_config think of it like running ``kubectl
+    #: create -f k8s_config``. The workload config can be passed as a path like 
+    #: string to a yaml file containing the workload definition or as a :type: dict
+    #: which contains a the workload definition.
     #:
     #: :type: :class:`dict` or :class:`str`
     #: :default: ``{}``
-    pod_config = variable(dict, str, value={})
+    k8s_config = variable(dict, str, value={})
+    
+    #TODO add docs
+    namespace = variable(str, type(None), value=None)
+    context = variable(str, type(None), value=None)
+    k8s_resource = variable(str, type(None), value=None)
 
     #: .. versionadded:: 3.3
     #:
@@ -1705,7 +1710,7 @@ class RegressionTest(RegressionMixin, jsonext.JSONSerializable):
                           sched_access=self._current_partition.access,
                           **job_opts)
         if scheduler.registered_name == "k8s":
-            job.pod_config = self.pod_config
+            job.k8s_config = self.k8s_config
         return job
 
     def _setup_build_job(self, **job_opts):
