@@ -108,9 +108,22 @@ def _logging_thread(namespace, context, identifier, std_out, num_pods):
             if pod.status.phase in ("Failed", "Succeeded","CrashLoopBackOff") and pod.metadata.name not in pod_names:
                 n_complete += 1
                 pod_names.append(pod.metadata.name)
-        time.sleep(5)
-    time.sleep(1)
+        time.sleep(0.5)
     
+    with open(std_out, "a+") as std_out_file:
+        std_out_file.write(f"{identifier}\n")
+        for name in pod_names:
+            std_out_file.write(f"\n-------{name}-------\n")
+            std_out_file.write(v1.read_namespaced_pod_log(name=name, namespace=namespace))
+
+def _dump_logs(namespace, context, identifier, std_out):
+    config.load_kube_config(os.environ["KUBECONFIG"], context=context)
+    v1 = client.CoreV1Api()
+    pod_names = []
+    pods = get_pods(identifier, namespace)
+    for pod in pods:
+        pod_names.append(pod.metadata.name)
+
     with open(std_out, "a+") as std_out_file:
         std_out_file.write(f"{identifier}\n")
         for name in pod_names:
@@ -125,12 +138,18 @@ def _has_finished(identifier, namespace, num_pods, context=None):
         statuses.append(pod.status.phase in ("Failed", "Succeeded", "CrashLoopBackOff"))
     return all(statuses) and len(statuses) == num_pods
 
+def _all_success(identifier, namespace, context=None):
+    config.load_kube_config(os.environ["KUBECONFIG"], context=context)
+    statuses = []
+    for pod in get_pods(identifier, namespace):
+        statuses.append(pod.status.phase == "Succeeded")
+    return all(statuses)
 
 def _delete_workload(identifier, namespace, resource, context=None):
     if context is None:
-        osext.run_command(f"kubectl delete {resource} --selector='rfm={identifier}' -n {namespace}")
+        osext.run_command(f"kubectl delete {resource} --selector='rfm={identifier}' -n {namespace}", check=True)
     else:
-        osext.run_command(f"kubectl delete {resource} --context={context} --selector='rfm={identifier}' -n {namespace}")
+        osext.run_command(f"kubectl delete {resource} --context={context} --selector='rfm={identifier}' -n {namespace}", check=True)
 
 
 #--------------------
@@ -187,8 +206,8 @@ def _launch_custom(namespace=None, context=None, job_def: dict={}, std_out=""):
     
     # TODO add logic for resource limits
     if context is None:
-        osext.run_command(f"kubectl create -f {os.path.join(stage_dir, 'k8s_def.yaml')} -n {namespace}")
+        osext.run_command(f"kubectl create -f {os.path.join(stage_dir, 'k8s_def.yaml')} -n {namespace}", check=True)
     else:
-        osext.run_command(f"kubectl create -f {os.path.join(stage_dir, 'k8s_def.yaml')} --context={context} -n {namespace}")
+        osext.run_command(f"kubectl create -f {os.path.join(stage_dir, 'k8s_def.yaml')} --context={context} -n {namespace}", check=True)
 
     

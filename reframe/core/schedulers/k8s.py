@@ -3,7 +3,7 @@ import os
 import signal
 import socket
 import time
-from threading import Thread
+from multiprocessing import Process
 import random
 import warnings
 import copy
@@ -26,7 +26,7 @@ class _K8Job(sched.Job):
         super().__init__(*args, **kwargs)
         self._identifier = None
         self._cancel_time = None
-        self._log_thread:Thread = None
+        self._log_thread:Process = None
         self._job_kind = None
         self._num_pods = None
 
@@ -73,6 +73,7 @@ class LocalJobScheduler(sched.JobScheduler):
         job._jobid = random.randint(0, 1000000)
         job._state = 'RUNNING'
         job._submit_time = time.time()
+        job._stdout = stdout
 
     def emit_preamble(self, job):
         return []
@@ -85,14 +86,17 @@ class LocalJobScheduler(sched.JobScheduler):
 
     def _kill_pod(self, job: _K8Job, cancel=False):
         '''Deletes the kubernetes pod and stops the logging thread'''
-        if not cancel:
+        
+        if not k8s_utils._all_success(job._identifier, job.namespace, job.context) or cancel:
+            job._exception = JobError(f'pod threw an error see the stdout for more information')
+            job._log_thread.close()
+            k8s_utils._dump_logs(job.namespace, job.context, job._identifier, job._stdout)
+            if cancel:
+                k8s_utils._delete_workload(job._identifier, job.namespace, job._job_kind, job.context)
+        else:
             job._log_thread.join()
-
-        k8s_utils._delete_workload(job._identifier, job.namespace, job._job_kind, job.context)
-
-        if cancel:
-            job._log_thread.join()
-        return
+            k8s_utils._delete_workload(job._identifier, job.namespace, job._job_kind, job.context)
+            
 
     def cancel(self, job: _K8Job):
         '''Deletes the kubernetes pod and stops the logging thread'''
@@ -100,14 +104,7 @@ class LocalJobScheduler(sched.JobScheduler):
         job._cancel_time = time.time()
 
     def wait(self, job):
-        '''Wait for the spawned job to finish.
-
-        As soon as the parent job process finishes, all of its spawned
-        subprocesses will be forced to finish, too.
-
-        Upon return, the whole process tree of the spawned job process will be
-        cleared, unless any of them has called `setsid()`.
-        '''
+        '''Wait for the job to finish'''
         while not self.finished(job):
             self.poll(job)
             time.sleep(self.WAIT_POLL_SECS)
