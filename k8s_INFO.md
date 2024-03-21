@@ -402,7 +402,7 @@ If any other issues are found please contact me at [crae@ed.ac.uk](mailto:crae@e
 
 ## Custom Workloads (**EXPERIMENTAL!!!**)
 
-This example will walk through how to implement a reframe test for a Graphcore k8s [IPU job](https://docs.graphcore.ai/projects/kubernetes-user-guide/en/1.1.0/creating-ipujob.html). Graphcore is a startup that have created a custom Processor designed for ML called an IPU.
+This example will walk through how to implement a reframe test for a Graphcore k8s [IPU job](https://docs.graphcore.ai/projects/kubernetes-user-guide/en/1.1.0/creating-ipujob.html).
 
 First lets define our k8s_config:
 ```yaml
@@ -495,5 +495,5 @@ class IPUTest(rfm.RunOnlyRegressionTest):
     valid_prog_environs = ["*"]
     k8s_resource = "ipujob"
     k8s_config = "/path/to/ipu_job.yml"
-    n = parameter([1,2,3])
+    n = parameter([1,2,3])  # NOT parameter([1,1,1])
 ```

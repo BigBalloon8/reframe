@@ -135,6 +135,12 @@ class LocalJobScheduler(sched.JobScheduler):
             self._kill_pod(job)
             return
 
+        if k8s_utils._pod_failed(job._identifier, job.namespace, job._num_pods, job.context):
+            self._kill_pod(job)
+            job._state = 'POD FAILED'
+            job._exception = JobError(f'pod failed see the stdout for more information')
+            return
+
         # Job has not finished; check if we have reached a timeout
         if not self.finished(job):
             t_elapsed = time.time() - job.submit_time

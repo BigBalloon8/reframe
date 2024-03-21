@@ -138,6 +138,14 @@ def _has_finished(identifier, namespace, num_pods, context=None):
         statuses.append(pod.status.phase in ("Failed", "Succeeded", "CrashLoopBackOff"))
     return all(statuses) and len(statuses) == num_pods
 
+def _pod_failed(identifier, namespace, num_pods, context=None):
+    config.load_kube_config(os.environ["KUBECONFIG"], context=context)
+    for pod in get_pods(identifier, namespace):
+        if pod.status.phase == "Failed":
+            return True
+    return False
+    
+
 def _all_success(identifier, namespace, context=None):
     config.load_kube_config(os.environ["KUBECONFIG"], context=context)
     statuses = []
