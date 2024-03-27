@@ -22,13 +22,9 @@ def _get_name_space(namespace=None):
                 cur_con = k_config["current-context"]
                 for context in k_config["contexts"]:
                     if context["name"] == cur_con:
-                        namespace = context["context"]["namespace"]
-                        break
+                        return context["context"]["namespace"]
             else:
-                try: 
-                    namespace = k_config["contexts"][0]["context"]["namespace"]
-                except (IndexError, KeyError):
-                    raise ValueError("Could not find namespace please provide with --namespace ________ to executable_opts")
+                return "default"
     return namespace
 
 
